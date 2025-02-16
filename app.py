@@ -1,3 +1,20 @@
+import sys
+try:
+    import pysqlite3
+    sys.modules["sqlite3"] = pysqlite3
+except ImportError:
+    pass
+import urllib3
+from urllib3.util.retry import Retry
+
+old_init = Retry.__init__
+
+def new_init(self, *args, **kwargs):
+    if "method_whitelist" in kwargs:
+        kwargs["allowed_methods"] = kwargs.pop("method_whitelist")
+    old_init(self, *args, **kwargs)
+
+Retry.__init__ = new_init
 import streamlit as st
 import requests
 import time
