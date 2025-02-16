@@ -18,10 +18,6 @@ from dotenv import load_dotenv
 # ----- LangChain & CrewAI Imports -----
 from langchain_community.document_loaders import TextLoader
 from pytrends.request import TrendReq
-from langchain_ollama import ChatOllama
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import FAISS
-from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain.chains import create_retrieval_chain
 from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain_core.prompts import ChatPromptTemplate
@@ -36,9 +32,16 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_CENTER, TA_LEFT
 from reportlab.pdfgen import canvas
 
+# ----- Additional LangChain Imports -----
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_community.vectorstores import FAISS
+from langchain_community.embeddings import HuggingFaceEmbeddings
+
+# Import LangChain's LLM base class from the correct location (Pydantic-based)
+from langchain.llms.base import LLM
+
 # ----- Load Environment Variables -----
 load_dotenv()
-
 
 # =============================================================================
 # Module 1: Startup Consultant (Data Fetching + RAG Pipeline)
@@ -53,14 +56,13 @@ def fetch_google_trends_data(keyword="startups"):
     trends = pytrends.interest_over_time()
     return trends.to_json()
 
-
 @st.cache_data
 def fetch_newsapi_data(query="startups"):
-    api_key = "178b04ae7bb94475ac292418f86bdbf2"  # Replace with your NewsAPI key if needed
-    url = f"https://newsapi.org/v2/everything?q={query}&apiKey={api_key}"
+    # Fetch the NewsAPI key from the .env file
+    newsapi_key = os.getenv("NEWSAPI_KEY")
+    url = f"https://newsapi.org/v2/everything?q={query}&apiKey={newsapi_key}"
     response = requests.get(url)
     return response.json().get("articles", [])
-
 
 @st.cache_data
 def load_combined_data():
@@ -72,11 +74,9 @@ def load_combined_data():
     ]
     return combined_docs
 
-
 def create_vector_store(docs):
     embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
     return FAISS.from_documents(docs, embeddings)
-
 
 # Prepare documents and build retriever
 data_docs = load_combined_data()
@@ -84,8 +84,43 @@ doc_chunks = RecursiveCharacterTextSplitter(chunk_size=500).split_documents(data
 vectorstore = create_vector_store(doc_chunks)
 retriever = vectorstore.as_retriever(search_kwargs={"k": 10})
 
-# Initialize LLM for Module 1 (Startup Consultant)
-llm = ChatOllama(model="deepseek-r1:1.5b", temperature=0.3, base_url="http://localhost:11434")
+# =============================================================================
+# Set up AIML API client (all calls go through https://api.aimlapi.com/v1)
+# =============================================================================
+
+# Fetch the AIML API key from the .env file
+aiml_api_key = os.getenv("AIML_API_KEY")
+base_url = "https://api.aimlapi.com/v1"
+model_name = "deepseek-ai/deepseek-llm-67b-chat"
+api = OpenAI(api_key=aiml_api_key, base_url=base_url)
+
+# -----------------------------------------------------------------------------
+# New AIMLLLMWrapper class that inherits from LangChain's LLM (as a Pydantic model)
+# -----------------------------------------------------------------------------
+class AIMLLLMWrapper(LLM):
+    api: Any
+    model: str
+    temperature: float = 0.5
+    max_tokens: int = 2000
+
+    @property
+    def _llm_type(self) -> str:
+        return "aiml"
+
+    def _call(self, prompt: str, stop: Optional[List[str]] = None) -> str:
+        response = self.api.chat.completions.create(
+            model=self.model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
+        )
+        return response.choices[0].message.content
+
+    async def _acall(self, prompt: str, stop: Optional[List[str]] = None) -> str:
+        raise NotImplementedError("Async call not supported.")
+
+# Instantiate our LLM wrapper using the API key from .env
+llm = AIMLLLMWrapper(api=api, model=model_name, temperature=0.3)
 
 # Define prompt for Startup Consultant
 system_prompt = (
@@ -98,7 +133,6 @@ prompt = ChatPromptTemplate.from_messages([
     ("system", system_prompt),
     ("human", "{input}")
 ])
-
 
 def startup_consultant_tab():
     st.header("Module 1: Startup Consultant")
@@ -113,17 +147,11 @@ def startup_consultant_tab():
             st.write("**Response from Startup Consultant:**")
             st.write(result)
 
-
 # =============================================================================
 # Module 2: Business Model Generation
 # =============================================================================
 
 def generate_business_model(scenario):
-    api_key = "e60721eb8c434d819159f4681f79cef8"  # Replace with your AIML API key if needed
-    base_url = "https://api.aimlapi.com/v1"
-    model_name = "deepseek-ai/deepseek-llm-67b-chat"
-    api = OpenAI(api_key=api_key, base_url=base_url)
-
     system_prompt_biz = (
         "You are a top-tier financial strategist and business planner. Based on the given scenario, "
         "create a comprehensive analysis that includes: "
@@ -145,7 +173,6 @@ def generate_business_model(scenario):
     )
     return completion.choices[0].message.content
 
-
 def business_model_tab():
     st.header("Module 2: Business Model Generation")
     if st.button("Generate Business Model", key="biz_model_submit"):
@@ -159,7 +186,6 @@ def business_model_tab():
                 st.write("**Business Model Analysis:**")
                 st.write(biz_response)
 
-
 # =============================================================================
 # Module 3: Pitch Deck Generation
 # =============================================================================
@@ -172,14 +198,12 @@ class VisualType(Enum):
     TIMELINE = "timeline"
     GRAPH = "graph"
 
-
 @dataclass
 class SlideContent:
     title: str
     content: str
     visual_type: Optional[VisualType] = None
     visual_data: Optional[Dict[str, Any]] = None
-
 
 @dataclass
 class PitchDeckData:
@@ -193,23 +217,23 @@ class PitchDeckData:
     traction: str
     future_outlook: str
 
-
 class AIContentGenerator:
-
     def generate_elevator_pitch(self, pitch_data: PitchDeckData) -> str:
         prompt_text = f"""Create a compelling elevator pitch for {pitch_data.company_name}.
-    Problem: {pitch_data.problem_statement}
-    Solution: {pitch_data.solution}
-    Market Size: ${pitch_data.market_size:,.2f}
-    """
+Problem: {pitch_data.problem_statement}
+Solution: {pitch_data.solution}
+Market Size: ${pitch_data.market_size:,.2f}
+"""
         try:
-            llm_pitch = ChatOllama(model="deepseek-r1:1.5b", temperature=0.3, base_url="http://localhost:11434")
-            # Use a message list format
-            response = llm_pitch.invoke(prompt_text)
-            # Adjust based on the response structure; typically:
-            return response.content
+            response = api.chat.completions.create(
+                model=model_name,
+                messages=[{"role": "user", "content": prompt_text}],
+                temperature=0.5,
+                max_tokens=500,
+            )
+            return response.choices[0].message.content
         except Exception as e:
-            st.error(f"Error generating elevator pitch with ChatOllama: {e}")
+            st.error(f"Error generating elevator pitch: {e}")
             return "Error generating elevator pitch. Please check the logs."
 
     def generate_executive_summary(self, pitch_data: PitchDeckData) -> str:
@@ -222,21 +246,24 @@ class AIContentGenerator:
                 team_description = "Core team in place"
 
         prompt_text = f"""Create a concise executive summary for {pitch_data.company_name} covering:
-        - Problem: {pitch_data.problem_statement}
-        - Solution: {pitch_data.solution} 
-        - Market Size: ${pitch_data.market_size:,.2f}
-        - Revenue Model: {json.dumps(pitch_data.revenue_model)}
-        - Key Traction: {pitch_data.traction}
-        - Roadmap Highlights: {pitch_data.roadmap[:2]}
-        - Team Strength: {team_description}
-        """
+- Problem: {pitch_data.problem_statement}
+- Solution: {pitch_data.solution} 
+- Market Size: ${pitch_data.market_size:,.2f}
+- Revenue Model: {json.dumps(pitch_data.revenue_model)}
+- Key Traction: {pitch_data.traction}
+- Roadmap Highlights: {pitch_data.roadmap[:2]}
+- Team Strength: {team_description}
+"""
         try:
-            llm_pitch = ChatOllama(model="deepseek-r1:1.5b", temperature=0.3, base_url="http://localhost:11434")
-            response = llm_pitch.invoke(prompt_text)
-            return response.content
+            response = api.chat.completions.create(
+                model=model_name,
+                messages=[{"role": "user", "content": prompt_text}],
+                temperature=0.3,
+                max_tokens=1000,
+            )
+            return response.choices[0].message.content
         except Exception as e:
-            return f"Error generating executive summary with ChatOllama: {e}"
-
+            return f"Error generating executive summary: {e}"
 
 class VisualizationGenerator:
     def create_market_size_chart(self, market_data):
